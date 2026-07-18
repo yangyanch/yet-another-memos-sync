@@ -59,6 +59,10 @@ export interface MemosSettings {
   // Persisted sync state (per profile id -> latest synced unix seconds)
   lastSyncByProfile: Record<string, string>;
   lastSyncDate: string;
+    // 新增设置
+  showEmoji: boolean;
+  tagMode: 'none' | 'smart' | 'always';
+  customTag: string;
 }
 
 export interface ListMemosPage {
