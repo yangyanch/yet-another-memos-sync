@@ -12,7 +12,7 @@ interface SyncStateData {
 
 export class SyncStateManager implements SyncStateStore {
     private app: App;
-    private filePath: string = '03-Thino/sync-state.json'; // 你指定的路径
+    private filePath: string = '_sync-state.json'; // 你指定的路径
     private data: SyncStateData;
 
     constructor(app: App) {
