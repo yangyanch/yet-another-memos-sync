@@ -39,10 +39,10 @@ export interface MemosProfile {
     enabled: boolean;
 }
 
-// --- 新增：同步状态结构 ---
+// --- 同步状态结构 ---
 export interface MemoSyncState {
-    hash: string;  // 内容哈希值，用于比对变更
-    time: number;  // 最后同步时间戳
+    hash: string; // 内容哈希值，用于比对变更
+    time: number; // 最后同步时间戳
 }
 
 export interface MemosSettings {
@@ -62,18 +62,22 @@ export interface MemosSettings {
     skipIfSyncedToday: boolean;
     periodicSyncInterval: number;
 
-    // Persisted sync state (per profile id -> latest synced unix seconds)
-    lastSyncByProfile: Record<string, string>;
-    lastSyncDate: string;
+    // --- 新增：安全开关 ---
+    enableMirrorDelete: boolean;
 
     // 新增设置
     showEmoji: boolean;
     tagMode: 'none' | 'smart' | 'always';
     customTag: string;
 
+    // --- 修改：这些字段改为可选，适配新的文件存储模式 ---
+    // Persisted sync state (per profile id -> latest synced unix seconds)
+    lastSyncByProfile?: Record<string, string>;
+    lastSyncDate?: string;
+
     // --- 新增：智能同步状态存储 ---
     // 结构: { [profileId]: { [memoId]: { hash, time } } }
-    memoStatesByProfile: Record<string, Record<string, MemoSyncState>>;
+    memoStatesByProfile?: Record<string, Record<string, MemoSyncState>>;
 }
 
 export interface ListMemosPage {
@@ -97,4 +101,14 @@ export interface APIClient {
 
 export interface MemosPaginator {
     foreach(handler: (dayData: [string, Record<string, string>]) => Promise<void>): Promise<string>;
+}
+
+// 状态存储接口（定义标准）
+export interface SyncStateStore {
+    getLastSync(profileId: string): string;
+    setLastSync(profileId: string, value: string): Promise<void>;
+    markSyncedToday(): Promise<void>;
+    getMemoSyncState(profileId: string, memoId: string): MemoSyncState | undefined;
+    setMemoSyncState(profileId: string, memoId: string, state: MemoSyncState): Promise<void>;
+    deleteMemoSyncState(profileId: string, memoId: string): Promise<void>;
 }

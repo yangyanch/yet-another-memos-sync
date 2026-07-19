@@ -1,6 +1,7 @@
 import { Plugin, Setting, PluginSettingTab, Notice, App, Modal, ButtonComponent } from 'obsidian';
-import { DailyNoteManager, SyncStateStore, SyncMode } from './src/services/dailyNoteManager';
-import { MemosProfile, MemosSettings, MemoSyncState } from './src/types';
+import { DailyNoteManager, SyncMode } from './src/services/dailyNoteManager';
+import { MemosProfile, MemosSettings } from './src/types';
+import { SyncStateManager } from './src/utils/syncStateManager'; // 引入新的状态管理器
 import { t } from './src/i18n/translationManager';
 
 interface LegacySettings {
@@ -10,13 +11,13 @@ interface LegacySettings {
     dailyMemoHeader?: unknown;
     syncDaysLimit?: unknown;
     profiles?: unknown;
-    lastSyncByProfile?: unknown;
+    lastSyncByProfile?: unknown; // 旧版字段，用于迁移判断
     lastSyncDate?: unknown;
 }
 
 const DEFAULT_SETTINGS: MemosSettings = {
     profiles: [],
-    attachmentFolderPath: 'attachments',
+    attachmentFolderPath: 'assets',
     createMissingDailyNotes: true,
     useCalloutFormat: false,
     useListCalloutFormat: false,
@@ -25,14 +26,11 @@ const DEFAULT_SETTINGS: MemosSettings = {
     startupSyncDelay: 5,
     skipIfSyncedToday: true,
     periodicSyncInterval: 0,
-    lastSyncByProfile: {},
-    lastSyncDate: '',
-    // --- 新增默认设置 ---
-    showEmoji: true,
-    tagMode: 'always',
-    customTag: '#daily-record',
-    // --- 新增：智能同步状态存储 ---
-    memoStatesByProfile: {},
+    // --- 移除了 lastSyncByProfile 和 memoStatesByProfile，现在由 SyncStateManager 文件管理 ---
+    enableMirrorDelete: false, // 默认关闭镜像删除，保护数据安全
+    showEmoji: false,
+    tagMode: 'smart',
+    customTag: '#Memos',
 };
 
 function generateProfileId(): string {
@@ -61,6 +59,7 @@ function migrateSettings(raw: unknown): MemosSettings {
         ...(legacy as object)
     };
 
+    // 迁移旧的平铺配置到 profiles
     if (!Array.isArray(merged.profiles) || merged.profiles.length === 0) {
         const legacyApiUrl = typeof legacy.apiUrl === 'string' ? legacy.apiUrl : '';
         const legacyApiToken = typeof legacy.apiToken === 'string' ? legacy.apiToken : '';
@@ -82,19 +81,6 @@ function migrateSettings(raw: unknown): MemosSettings {
         }
     }
 
-    if (!merged.lastSyncByProfile || typeof merged.lastSyncByProfile !== 'object') {
-        merged.lastSyncByProfile = {};
-    }
-    
-    // 确保新的状态字段存在
-    if (!merged.memoStatesByProfile || typeof merged.memoStatesByProfile !== 'object') {
-        merged.memoStatesByProfile = {};
-    }
-
-    if (typeof merged.lastSyncDate !== 'string') {
-        merged.lastSyncDate = '';
-    }
-
     // Strip legacy top-level fields so they don't get re-saved.
     const cleaned = merged as MemosSettings & LegacySettings;
     delete cleaned.apiUrl;
@@ -102,6 +88,11 @@ function migrateSettings(raw: unknown): MemosSettings {
     delete cleaned.apiVersion;
     delete cleaned.dailyMemoHeader;
     delete cleaned.syncDaysLimit;
+    // 清理旧的状态字段，这些现在由文件管理
+    delete cleaned.lastSyncByProfile;
+    delete cleaned.memoStatesByProfile;
+    delete cleaned.lastSyncDate;
+
     return merged;
 }
 
@@ -130,14 +121,21 @@ class ConfirmModal extends Modal {
     }
 }
 
-export default class YetAnotherMemosSyncPlugin extends Plugin implements SyncStateStore {
+export default class YetAnotherMemosSyncPlugin extends Plugin {
     settings: MemosSettings;
     private dailyNoteManager: DailyNoteManager;
+    private syncStateManager: SyncStateManager; // 新增：状态管理器实例
     private periodicSyncIntervalId: number | null = null;
 
     async onload(): Promise<void> {
         await this.loadSettings();
-        this.dailyNoteManager = new DailyNoteManager(this.app, this.settings, this);
+
+        // --- 新增：初始化并加载状态管理器 ---
+        this.syncStateManager = new SyncStateManager(this.app);
+        await this.syncStateManager.load();
+
+        // 将状态管理器注入到 DailyNoteManager
+        this.dailyNoteManager = new DailyNoteManager(this.app, this.settings, this.syncStateManager);
 
         this.addRibbonIcon('sync', t.t('SYNC_MEMOS'), () => {
             void this.runSync('smart');
@@ -188,45 +186,6 @@ export default class YetAnotherMemosSyncPlugin extends Plugin implements SyncSta
         this.schedulePeriodicSync();
     }
 
-    // --- SyncStateStore impl (旧接口) ---
-    getLastSync(profileId: string): string {
-        return this.settings.lastSyncByProfile[profileId] || '';
-    }
-
-    async setLastSync(profileId: string, value: string): Promise<void> {
-        this.settings.lastSyncByProfile[profileId] = value;
-        await this.saveData(this.settings);
-    }
-
-    async markSyncedToday(): Promise<void> {
-        this.settings.lastSyncDate = new Date().toDateString();
-        await this.saveData(this.settings);
-    }
-
-    // --- SyncStateStore impl (新接口：哈希状态管理) ---
-    
-    // 获取某条 Memo 的同步状态
-    getMemoSyncState(profileId: string, memoId: string): MemoSyncState | undefined {
-        return this.settings.memoStatesByProfile[profileId]?.[memoId];
-    }
-
-    // 保存某条 Memo 的同步状态
-    async setMemoSyncState(profileId: string, memoId: string, state: MemoSyncState): Promise<void> {
-        if (!this.settings.memoStatesByProfile[profileId]) {
-            this.settings.memoStatesByProfile[profileId] = {};
-        }
-        this.settings.memoStatesByProfile[profileId][memoId] = state;
-        await this.saveData(this.settings);
-    }
-
-    // 删除某条 Memo 的同步状态 (用于清理)
-    async deleteMemoSyncState(profileId: string, memoId: string): Promise<void> {
-        if (this.settings.memoStatesByProfile[profileId]?.[memoId]) {
-            delete this.settings.memoStatesByProfile[profileId][memoId];
-            await this.saveData(this.settings);
-        }
-    }
-
     private async runSync(mode: SyncMode): Promise<void> {
         try {
             new Notice(mode === 'force' ? t.t('FORCE_SYNC_STARTING') : t.t('SYNC_STARTING'));
@@ -240,9 +199,11 @@ export default class YetAnotherMemosSyncPlugin extends Plugin implements SyncSta
     }
 
     private scheduleStartupSync(): void {
-        if (this.settings.skipIfSyncedToday && this.settings.lastSyncDate === new Date().toDateString()) {
+        // --- 修改：使用 syncStateManager 判断是否同步过 ---
+        if (this.settings.skipIfSyncedToday && this.syncStateManager.hasSyncedToday()) {
             return;
         }
+
         const handle = window.setTimeout(() => {
             void this.runSync('smart');
         }, this.settings.startupSyncDelay * 1000);
@@ -254,6 +215,7 @@ export default class YetAnotherMemosSyncPlugin extends Plugin implements SyncSta
             window.clearInterval(this.periodicSyncIntervalId);
             this.periodicSyncIntervalId = null;
         }
+
         if (this.settings.periodicSyncInterval > 0) {
             const id = window.setInterval(
                 () => {
@@ -275,9 +237,9 @@ export default class YetAnotherMemosSyncPlugin extends Plugin implements SyncSta
 
     removeProfile(profileId: string): void {
         this.settings.profiles = this.settings.profiles.filter(p => p.id !== profileId);
-        delete this.settings.lastSyncByProfile[profileId];
-        // 同时清理该 Profile 对应的同步状态数据
-        delete this.settings.memoStatesByProfile[profileId];
+        // 注意：这里不需要手动清理 lastSyncByProfile 了，SyncStateManager 会处理，
+        // 而且 gcMemoStates 会自动清理过期的状态。
+        // 如果需要立即清空该 profile 的所有状态，可以添加相关方法，但通常不需要。
     }
 }
 
@@ -326,7 +288,6 @@ class YetAnotherMemosSyncSettingTab extends PluginSettingTab {
 
     private renderProfile(containerEl: HTMLElement, profile: MemosProfile): void {
         const card = containerEl.createDiv({ cls: 'yams-profile-card' });
-
         new Setting(card).setName(profile.name || 'Unnamed').setHeading();
 
         new Setting(card)
@@ -405,6 +366,16 @@ class YetAnotherMemosSyncSettingTab extends PluginSettingTab {
 
     private renderSyncFormatSection(containerEl: HTMLElement): void {
         new Setting(containerEl).setName(t.t('SYNC_CONFIG_TITLE')).setHeading();
+
+        new Setting(containerEl)
+            .setName('开启镜像删除 (双向同步删除)')
+            .setDesc('开启后，删除 Obsidian 本地日记将同步删除 Memos 服务端数据，反之亦然。关闭则只同步新增和修改，防止误删数据。')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.enableMirrorDelete)
+                .onChange(async (value) => {
+                    this.plugin.settings.enableMirrorDelete = value;
+                    await this.plugin.saveSettings();
+                }));
 
         new Setting(containerEl)
             .setName(t.t('ATTACHMENT_FOLDER_NAME'))

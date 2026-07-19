@@ -1,4 +1,5 @@
 import { requestUrl, RequestUrlResponse } from 'obsidian';
+import { moment } from 'obsidian'; // 引入 moment 用于时间格式转换
 import { APIClient, ListMemosOptions, ListMemosPage, Memo } from '../types';
 import { t } from '../i18n/translationManager';
 
@@ -7,32 +8,18 @@ interface ListMemosResponse {
     nextPageToken?: string;
 }
 
-/**
- * HTTP client for the memos /api/v1/memos endpoint.
- * Supports CEL filter and proper page-token pagination.
- * Uses Obsidian's requestUrl so it works on both desktop and mobile.
- */
 export class MemosAPIClient implements APIClient {
     private baseURL: string;
     private token: string;
 
-    // 暴露 baseURL 和 token 供 Paginator 等其他模块使用（如下载图片）
-    public getBaseURL(): string {
-        return this.baseURL;
-    }
-
-    public getToken(): string {
-        return this.token;
-    }
+    public getBaseURL(): string { return this.baseURL; }
+    public getToken(): string { return this.token; }
 
     constructor(baseURL: string, token: string) {
         this.baseURL = baseURL.replace(/\/$/, '');
         this.token = token;
     }
 
-    /**
-     * 获取 Memos 列表
-     */
     async listMemos(opts: ListMemosOptions = {}): Promise<ListMemosPage> {
         const params = new URLSearchParams();
         params.set('pageSize', String(opts.pageSize ?? 100));
@@ -40,7 +27,6 @@ export class MemosAPIClient implements APIClient {
         if (opts.filter) params.set('filter', opts.filter);
 
         const url = `${this.baseURL}/api/v1/memos?${params.toString()}`;
-
         let response: RequestUrlResponse;
         try {
             response = await requestUrl({
@@ -75,20 +61,15 @@ export class MemosAPIClient implements APIClient {
     /**
      * 创建新 Memo
      * @param content 内容
-     * @param createdTs 可选，Unix 时间戳 (秒)。如果未提供，服务器使用当前时间。
+     * @param createdTs Unix 时间戳 (秒)。如果提供，将转换为 RFC3339 格式的 createTime。
      */
     async createMemo(content: string, createdTs?: number): Promise<Memo> {
         const url = `${this.baseURL}/api/v1/memos`;
-        
-        // 构造请求体
-        const body: any = {
-            content: content,
-            // visibility: 'PRIVATE', // 可选，根据需要设置
-        };
-        
-        // 如果提供了时间戳，添加到请求体 (Memos v0.22+ API 字段通常为 createdTs)
-        if (createdTs) {
-            body.createdTs = createdTs;
+        const body: any = { content: content };
+
+        if (createdTs !== undefined && createdTs !== null) {
+            // 将 Unix 时间戳转换为 RFC3339 格式字符串，并使用 createTime 字段
+            body.createTime = moment.unix(createdTs).utc().format('YYYY-MM-DDTHH:mm:ss[Z]');
         }
 
         let response: RequestUrlResponse;
@@ -119,24 +100,31 @@ export class MemosAPIClient implements APIClient {
 
     /**
      * 更新现有 Memo
-     * @param id Memo ID (数字或字符串)
+     * @param id Memo ID
      * @param content 新内容
+     * @param createdTs 可选，Unix 时间戳 (秒)。如果提供，将转换为 RFC3339 格式的 createTime。
      */
-    async updateMemo(id: number | string, content: string): Promise<Memo> {
+    async updateMemo(id: number | string, content: string, createdTs?: number): Promise<Memo> {
         const url = `${this.baseURL}/api/v1/memos/${id}`;
+        const body: any = { content: content };
+        
+        if (createdTs !== undefined && createdTs !== null) {
+            // 将 Unix 时间戳转换为 RFC3339 格式字符串，并使用 createTime 字段
+            body.createTime = moment.unix(createdTs).utc().format('YYYY-MM-DDTHH:mm:ss[Z]');
+            // 注意：更新 createTime 可能需要 updateMask 包含 "createTime"，具体取决于 API 版本实现。
+            // 如果更新不生效，可能需要添加: body.updateMask = "content,createTime";
+        }
 
         let response: RequestUrlResponse;
         try {
             response = await requestUrl({
                 url,
-                method: 'PATCH', // 或 'PUT'，取决于 Memos 版本，v0.22+ 通常支持 PATCH
+                method: 'PATCH',
                 headers: {
                     'Authorization': `Bearer ${this.token}`,
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify({
-                    content: content,
-                }),
+                body: JSON.stringify(body),
                 throw: false,
             });
         } catch (error) {
@@ -153,13 +141,8 @@ export class MemosAPIClient implements APIClient {
         return response.json as Memo;
     }
 
-    /**
-     * 删除 Memo
-     * @param id Memo ID
-     */
     async deleteMemo(id: number | string): Promise<void> {
         const url = `${this.baseURL}/api/v1/memos/${id}`;
-
         let response: RequestUrlResponse;
         try {
             response = await requestUrl({
@@ -171,7 +154,7 @@ export class MemosAPIClient implements APIClient {
                 throw: false,
             });
         } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
+            const message = error instanceof Error ? String(error) : 'Unknown error';
             throw new Error(`Network error deleting memo ${id}: ${message}`);
         }
 
