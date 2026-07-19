@@ -1,6 +1,6 @@
 import { Plugin, Setting, PluginSettingTab, Notice, App, Modal, ButtonComponent } from 'obsidian';
 import { DailyNoteManager, SyncStateStore, SyncMode } from './src/services/dailyNoteManager';
-import { MemosProfile, MemosSettings } from './src/types';
+import { MemosProfile, MemosSettings, MemoSyncState } from './src/types';
 import { t } from './src/i18n/translationManager';
 
 interface LegacySettings {
@@ -27,11 +27,12 @@ const DEFAULT_SETTINGS: MemosSettings = {
     periodicSyncInterval: 0,
     lastSyncByProfile: {},
     lastSyncDate: '',
-    
     // --- 新增默认设置 ---
     showEmoji: true,
     tagMode: 'always',
     customTag: '#daily-record',
+    // --- 新增：智能同步状态存储 ---
+    memoStatesByProfile: {},
 };
 
 function generateProfileId(): string {
@@ -55,7 +56,10 @@ function defaultProfile(): MemosProfile {
  */
 function migrateSettings(raw: unknown): MemosSettings {
     const legacy = (raw && typeof raw === 'object' ? raw : {}) as LegacySettings;
-    const merged: MemosSettings = { ...DEFAULT_SETTINGS, ...(legacy as object) };
+    const merged: MemosSettings = {
+        ...DEFAULT_SETTINGS,
+        ...(legacy as object)
+    };
 
     if (!Array.isArray(merged.profiles) || merged.profiles.length === 0) {
         const legacyApiUrl = typeof legacy.apiUrl === 'string' ? legacy.apiUrl : '';
@@ -81,6 +85,12 @@ function migrateSettings(raw: unknown): MemosSettings {
     if (!merged.lastSyncByProfile || typeof merged.lastSyncByProfile !== 'object') {
         merged.lastSyncByProfile = {};
     }
+    
+    // 确保新的状态字段存在
+    if (!merged.memoStatesByProfile || typeof merged.memoStatesByProfile !== 'object') {
+        merged.memoStatesByProfile = {};
+    }
+
     if (typeof merged.lastSyncDate !== 'string') {
         merged.lastSyncDate = '';
     }
@@ -92,7 +102,6 @@ function migrateSettings(raw: unknown): MemosSettings {
     delete cleaned.apiVersion;
     delete cleaned.dailyMemoHeader;
     delete cleaned.syncDaysLimit;
-
     return merged;
 }
 
@@ -179,7 +188,7 @@ export default class YetAnotherMemosSyncPlugin extends Plugin implements SyncSta
         this.schedulePeriodicSync();
     }
 
-    // SyncStateStore impl
+    // --- SyncStateStore impl (旧接口) ---
     getLastSync(profileId: string): string {
         return this.settings.lastSyncByProfile[profileId] || '';
     }
@@ -192,6 +201,30 @@ export default class YetAnotherMemosSyncPlugin extends Plugin implements SyncSta
     async markSyncedToday(): Promise<void> {
         this.settings.lastSyncDate = new Date().toDateString();
         await this.saveData(this.settings);
+    }
+
+    // --- SyncStateStore impl (新接口：哈希状态管理) ---
+    
+    // 获取某条 Memo 的同步状态
+    getMemoSyncState(profileId: string, memoId: string): MemoSyncState | undefined {
+        return this.settings.memoStatesByProfile[profileId]?.[memoId];
+    }
+
+    // 保存某条 Memo 的同步状态
+    async setMemoSyncState(profileId: string, memoId: string, state: MemoSyncState): Promise<void> {
+        if (!this.settings.memoStatesByProfile[profileId]) {
+            this.settings.memoStatesByProfile[profileId] = {};
+        }
+        this.settings.memoStatesByProfile[profileId][memoId] = state;
+        await this.saveData(this.settings);
+    }
+
+    // 删除某条 Memo 的同步状态 (用于清理)
+    async deleteMemoSyncState(profileId: string, memoId: string): Promise<void> {
+        if (this.settings.memoStatesByProfile[profileId]?.[memoId]) {
+            delete this.settings.memoStatesByProfile[profileId][memoId];
+            await this.saveData(this.settings);
+        }
     }
 
     private async runSync(mode: SyncMode): Promise<void> {
@@ -221,7 +254,6 @@ export default class YetAnotherMemosSyncPlugin extends Plugin implements SyncSta
             window.clearInterval(this.periodicSyncIntervalId);
             this.periodicSyncIntervalId = null;
         }
-
         if (this.settings.periodicSyncInterval > 0) {
             const id = window.setInterval(
                 () => {
@@ -244,6 +276,8 @@ export default class YetAnotherMemosSyncPlugin extends Plugin implements SyncSta
     removeProfile(profileId: string): void {
         this.settings.profiles = this.settings.profiles.filter(p => p.id !== profileId);
         delete this.settings.lastSyncByProfile[profileId];
+        // 同时清理该 Profile 对应的同步状态数据
+        delete this.settings.memoStatesByProfile[profileId];
     }
 }
 
@@ -260,7 +294,6 @@ class YetAnotherMemosSyncSettingTab extends PluginSettingTab {
         containerEl.empty();
 
         new Setting(containerEl).setName(t.t('SETTINGS_TITLE')).setHeading();
-
         this.renderProfilesSection(containerEl);
         this.renderSyncFormatSection(containerEl);
         this.renderAutoSyncSection(containerEl);
@@ -274,10 +307,7 @@ class YetAnotherMemosSyncSettingTab extends PluginSettingTab {
 
         const profiles = this.plugin.settings.profiles;
         if (profiles.length === 0) {
-            containerEl.createEl('p', {
-                text: t.t('NO_PROFILES_HINT'),
-                cls: 'setting-item-description',
-            });
+            containerEl.createEl('p', { text: t.t('NO_PROFILES_HINT'), cls: 'setting-item-description' });
         }
 
         for (const profile of profiles) {
@@ -296,7 +326,7 @@ class YetAnotherMemosSyncSettingTab extends PluginSettingTab {
 
     private renderProfile(containerEl: HTMLElement, profile: MemosProfile): void {
         const card = containerEl.createDiv({ cls: 'yams-profile-card' });
-        
+
         new Setting(card).setName(profile.name || 'Unnamed').setHeading();
 
         new Setting(card)
@@ -458,9 +488,7 @@ class YetAnotherMemosSyncSettingTab extends PluginSettingTab {
                 }));
 
         if (this.plugin.settings.useListCalloutFormat) {
-            const hint = containerEl.createEl('div', {
-                cls: 'setting-item-description yet-another-memos-sync-callout-note',
-            });
+            const hint = containerEl.createEl('div', { cls: 'setting-item-description yet-another-memos-sync-callout-note' });
             hint.appendText('💡 为获得最佳视觉效果，建议安装 ');
             hint.createEl('strong', { text: 'List Callouts' });
             hint.appendText(' 插件，它可以根据 emoji 自动为列表添加颜色样式。');

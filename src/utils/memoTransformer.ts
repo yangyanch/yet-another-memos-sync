@@ -1,153 +1,113 @@
 import { moment } from 'obsidian';
-import { Memo, Resource, DailyMemo } from '../types';
-import { getTimeEmoji } from './timeEmoji';
-/**
- * Generate resource link for attachment
- */
-export function generateResourceLink(resource: Resource): string {
-    if (!resource.externalLink) {
-        return `![[${generateResourceName(resource)}]]`;
-    }
-    const prefix = resource.type?.includes("image") ? "!" : "";
-    return `${prefix}[${resource.name || resource.filename}](${resource.externalLink})`;
+import { getSafeFilename } from './resourceUtils'; // 引入公共逻辑
+
+function getTimeEmoji(hour: number): string {
+    if (hour >= 5 && hour < 12) return '🌅';
+    if (hour >= 12 && hour < 17) return '☀️';
+    if (hour >= 17 && hour < 21) return '🌆';
+    return '🌙';
 }
-/**
- * Generate safe filename for resource
- */
-export function generateResourceName(resource: Resource): string {
-    return `${resource.id}-${resource.filename?.replace(/[/\\?%*:|"<>]/g, "-")}`;
+
+function getTimeCalloutType(hour: number): string {
+    if (hour >= 5 && hour < 12) return 'info';
+    if (hour >= 12 && hour < 17) return 'tip';
+    if (hour >= 17 && hour < 21) return 'warning';
+    return 'note';
 }
-/**
- * Get callout type based on hour
- */
-export function getCalloutType(hour: number): string {
-    if (hour >= 5 && hour < 12) return 'info'; // 早晨 (蓝色)
-    if (hour >= 12 && hour < 17) return 'tip'; // 中午 (绿色)
-    if (hour >= 17 && hour < 21) return 'warning'; // 傍晚 (橙色)
-    return 'note'; // 夜晚 (紫色)
-}
-/**
- * Get time period name for callout
- */
-export function getTimePeriod(hour: number): string {
+
+function getTimePeriodName(hour: number): string {
     if (hour >= 5 && hour < 12) return '早晨';
     if (hour >= 12 && hour < 17) return '中午';
     if (hour >= 17 && hour < 21) return '傍晚';
     return '夜晚';
 }
+
 /**
- * Get enhanced emoji for List Callout format
- * Simplified 4-period system that works perfectly with List Callouts plugin
+ * 清理多余的空行，保持内容紧凑
  */
-export function getListCalloutEmoji(hour: number): string {
-    if (hour >= 5 && hour < 12) return '🌅'; // 早晨 (蓝色主题)
-    if (hour >= 12 && hour < 17) return '☀️'; // 中午 (绿色主题)
-    if (hour >= 17 && hour < 21) return '🌆'; // 傍晚 (橙色主题)
-    return '🌙'; // 夜晚 (紫色主题)
+function cleanExcessLines(text: string): string {
+    // 移除 Windows 换行符
+    text = text.replace(/\r\n/g, '\n');
+    // 将连续多个换行符替换为一个
+    text = text.replace(/\n{2,}/g, '\n');
+    // 移除每行首尾空白（保留换行结构）
+    const lines = text.split('\n').map(line => line.trim());
+    return lines.join('\n');
 }
+
 /**
- * Transform API memo to markdown format with emoji enhancement
+ * 将 Memo 转换为 Obsidian Markdown 格式
+ * 注意：此函数只负责内容格式化，不负责添加 ID
  */
 export function transformMemoToMarkdown(
-    memo: Memo, 
-    useCalloutFormat = false, 
-    useListCalloutFormat = false, 
-    skipImages = false,
-    // --- 新增参数 ---
-    showEmoji = true,
-    tagMode: 'none' | 'smart' | 'always' = 'always',
-    customTag = '#daily-record'
-): DailyMemo {
-    const { timestamp, content } = memo;
-    // Filter out image resources if skipImages is enabled
-    const resources = skipImages ? (memo.resources || []).filter(r => !r.type?.includes('image')) : memo.resources;
-    // Validate timestamp
-    if (typeof timestamp !== 'number' || !isFinite(timestamp) || timestamp <= 0) {
-        throw new Error(`Invalid timestamp: ${String(timestamp)}`);
-    }
-    const momentDate = moment(timestamp * 1000);
-    if (!momentDate.isValid()) {
-        throw new Error(`Timestamp produces invalid date: ${timestamp}`);
-    }
-    const date = momentDate.format("YYYY-MM-DD");
-    const time = momentDate.format("HH:mm");
-    const hour = momentDate.hour();
-    // --- 修改逻辑：根据设置决定 Emoji ---
-    const rawEmoji = useListCalloutFormat ? getListCalloutEmoji(hour) : getTimeEmoji(hour);
-    const emojiStr = showEmoji ? `${rawEmoji} ` : ''; 
-    // --- 修改逻辑：根据设置决定 Tag ---
-    let tagStr = '';
-    if (tagMode === 'always') {
-        tagStr = ` ${customTag}`;
-    } else if (tagMode === 'smart') {
-        // 判断内容是否含有标签
-        if (!content.includes('#')) {
-            tagStr = ` ${customTag}`;
+    memo: { timestamp: number; content: string; resources: any[] },
+    useCalloutFormat: boolean,
+    useListCalloutFormat: boolean,
+    skipImages: boolean,
+    showEmoji: boolean,
+    tagMode: 'none' | 'smart' | 'always',
+    customTag: string
+): { date: string; timestamp: string; content: string } {
+    const { timestamp, content, resources } = memo;
+    const m = moment(timestamp * 1000);
+    const dateStr = m.format('YYYY-MM-DD');
+    const timeStr = m.format('HH:mm');
+    const hour = m.hour();
+
+    const emoji = showEmoji ? `${getTimeEmoji(hour)} ` : '';
+
+    // 过滤资源
+    const targetResources = skipImages ? resources.filter(r => !(r.type && r.type.includes('image'))) : resources;
+
+    // 生成资源 Markdown 链接
+    const resourceMarkdown = targetResources.map(res => {
+        if (res.type && res.type.includes('image')) {
+            return `![[${getSafeFilename(res)}]]`;
         }
+        return res.externalLink ? `[${res.filename || 'resource'}](${res.externalLink})` : `![[${getSafeFilename(res)}]]`;
+    });
+
+    // 处理标签
+    let tagText = '';
+    if (tagMode === 'always' || (tagMode === 'smart' && !content.includes('#'))) {
+        tagText = ` ${customTag}`;
     }
-    // Use callout format if enabled
+
+    // --- 核心格式化逻辑 ---
+    let body = '';
+
+    // 1. 清理内容中的多余空行
+    const cleanContent = cleanExcessLines(content || '');
+    const contentLines = cleanContent.split('\n');
+
     if (useCalloutFormat) {
-        const calloutType = getCalloutType(hour);
-        const timePeriod = getTimePeriod(hour);
-        // Process content for callout format - ensure each line has proper ">" prefix
-        const contentLines = content.trim().split("\n");
-        const processedContent = contentLines
-            .map(line => line.trim())
-            .filter(line => line.length > 0)
-            .map(line => `> ${line}`)
-            .join("\n");
-        // Add resources if any
-        const resourceLines = resources?.length ? "\n>\n" + resources.map(resource => `> ${generateResourceLink(resource)}`).join("\n") : "";
-        // Create callout with proper formatting and extra newline for separation
-        const finalContent = `> [!${calloutType}] ${emojiStr}${time} - ${timePeriod}\n${processedContent}${resourceLines}\n> \n> ^${timestamp}\n`;
-        return {
-            date,
-            timestamp: String(timestamp),
-            content: finalContent,
-        };
-    }
-    // List Callout format - merge multiple lines with spaces for better visual effect
-    if (useListCalloutFormat) {
-        // For List Callout format, merge all lines with spaces to maintain background color
-        const mergedContent = content.trim().replace(/\n+/g, ' ').replace(/\s+/g, ' ');
-        const taskMatch = mergedContent.match(/(- \[.?\])(.*)/);
-        let targetFirstLine: string;
-        if (taskMatch) {
-            targetFirstLine = `${taskMatch[1]} ${emojiStr}${time} ${taskMatch[2]}`;
-        } else {
-            targetFirstLine = `- ${emojiStr}${time} ${mergedContent.replace(/^- /, "")}`;
-        }
-        targetFirstLine += `${tagStr} ^${timestamp}`;
-        const targetResourceLines = resources?.length ? "\n" + resources.map(resource => ` - ${generateResourceLink(resource)}`).join("\n") : "";
-        return {
-            date,
-            timestamp: String(timestamp),
-            content: targetFirstLine + targetResourceLines,
-        };
-    }
-    // Original list format
-    const [firstLine, ...otherLines] = content.trim().split("\n");
-    const taskMatch = firstLine.match(/(- \[.?\])(.*)/);
-    const isCode = /```/.test(firstLine);
-    let targetFirstLine: string;
-    if (taskMatch) {
-        targetFirstLine = `${taskMatch[1]} ${emojiStr}${time} ${taskMatch[2]}`;
-    } else if (isCode) {
-        targetFirstLine = `- ${emojiStr}${time}`;
-        otherLines.unshift(firstLine);
+        const calloutType = getTimeCalloutType(hour);
+        // Callout 内部不需要缩进，直接使用原始换行
+        const formattedContent = contentLines.map(l => `> ${l}`).join('\n');
+        const resLines = resourceMarkdown.map(l => `> ${l}`).join('\n');
+        body = `> [!${calloutType}] ${emoji}${timeStr} - ${getTimePeriodName(hour)}\n${formattedContent}\n${resLines}`;
+    } else if (useListCalloutFormat) {
+        // 单行模式
+        const line = `- ${emoji}${timeStr} ${contentLines.join(' ')}${tagText}`;
+        const resLines = resourceMarkdown.map(l => `  ${l}`).join('\n');
+        body = resLines ? `${line}\n${resLines}` : line;
     } else {
-        targetFirstLine = `- ${emojiStr}${time} ${firstLine.replace(/^- /, "")}`;
+        // 标准列表模式 (适配你的习惯)
+        // 第一行：- HH:mm Content
+        const firstLine = contentLines.shift();
+        let result = `- ${emoji}${timeStr} ${firstLine}${tagText}`;
+        
+        // 后续行：缩进两个空格
+        if (contentLines.length > 0) {
+            result += '\n' + contentLines.map(l => `  ${l}`).join('\n');
+        }
+        
+        // 资源：缩进两个空格
+        if (resourceMarkdown.length > 0) {
+            result += '\n' + resourceMarkdown.map(l => `  ${l}`).join('\n');
+        }
+        body = result;
     }
-    targetFirstLine += `${tagStr} ^${timestamp}`;
-    // Process multi-line content properly (use 2 spaces for list indentation)
-    const targetOtherLines = otherLines?.length ? "\n" + otherLines
-        .filter(line => line.trim())
-        .map(line => ` ${line}`)
-        .join("\n") : "";
-    const targetResourceLines = resources?.length ? "\n" + resources.map(resource => ` - ${generateResourceLink(resource)}`).join("\n") : "";
-    return {
-        date,
-        timestamp: String(timestamp),
-        content: targetFirstLine + targetOtherLines + targetResourceLines,
-    };
+
+    return { date: dateStr, timestamp: String(timestamp), content: body };
 }
