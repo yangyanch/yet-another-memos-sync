@@ -70,6 +70,11 @@ export interface MemosSettings {
     tagMode: 'none' | 'smart' | 'always';
     customTag: string;
 
+    // --- [新增] 过滤与调试设置 ---
+    excludeTags: string[]; // 排除同步的标签列表
+    syncStateFilePath: string; // 状态文件存储路径
+    debugMode: boolean; // 调试模式开关
+
     // --- 修改：这些字段改为可选，适配新的文件存储模式 ---
     // Persisted sync state (per profile id -> latest synced unix seconds)
     lastSyncByProfile?: Record<string, string>;

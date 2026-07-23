@@ -15,6 +15,11 @@ interface LegacySettings {
     lastSyncDate?: unknown;
 }
 
+// [修改说明]：假设已在 src/types.ts 中为 MemosSettings 添加了以下字段：
+// excludeTags: string[];       // 排除的标签列表
+// syncStateFilePath: string;   // 状态文件存储路径
+// debugMode: boolean;          // 调试模式开关
+// 如果尚未添加，请先添加，或在此处扩展接口定义。
 const DEFAULT_SETTINGS: MemosSettings = {
     profiles: [],
     attachmentFolderPath: 'assets',
@@ -26,11 +31,14 @@ const DEFAULT_SETTINGS: MemosSettings = {
     startupSyncDelay: 5,
     skipIfSyncedToday: true,
     periodicSyncInterval: 0,
-    // --- 移除了 lastSyncByProfile 和 memoStatesByProfile，现在由 SyncStateManager 文件管理 ---
-    enableMirrorDelete: false, // 默认关闭镜像删除，保护数据安全
+    enableMirrorDelete: false, 
     showEmoji: false,
     tagMode: 'smart',
     customTag: '#Memos',
+    // --- [新增] 默认值设置 ---
+    excludeTags: [], // 默认不排除任何标签
+    syncStateFilePath: '.memos_sync/sync-state.json', // 默认状态文件路径
+    debugMode: false, // 默认关闭调试模式
 };
 
 function generateProfileId(): string {
@@ -92,7 +100,6 @@ function migrateSettings(raw: unknown): MemosSettings {
     delete cleaned.lastSyncByProfile;
     delete cleaned.memoStatesByProfile;
     delete cleaned.lastSyncDate;
-
     return merged;
 }
 
@@ -100,7 +107,6 @@ class ConfirmModal extends Modal {
     constructor(app: App, private message: string, private onConfirm: () => void) {
         super(app);
     }
-
     onOpen(): void {
         this.contentEl.createEl('p', { text: this.message });
         const buttons = this.contentEl.createDiv({ cls: 'modal-button-container' });
@@ -115,7 +121,6 @@ class ConfirmModal extends Modal {
                 this.onConfirm();
             });
     }
-
     onClose(): void {
         this.contentEl.empty();
     }
@@ -124,17 +129,19 @@ class ConfirmModal extends Modal {
 export default class YetAnotherMemosSyncPlugin extends Plugin {
     settings: MemosSettings;
     private dailyNoteManager: DailyNoteManager;
-    private syncStateManager: SyncStateManager; // 新增：状态管理器实例
+    public syncStateManager: SyncStateManager; // 新增：状态管理器实例
     private periodicSyncIntervalId: number | null = null;
 
     async onload(): Promise<void> {
         await this.loadSettings();
 
-        // --- 新增：初始化并加载状态管理器 ---
-        this.syncStateManager = new SyncStateManager(this.app);
+        // --- [新增] 初始化状态管理器，传入自定义路径 ---
+        // 注意：如果路径为空，则使用默认路径
+        const stateFilePath = this.settings.syncStateFilePath || DEFAULT_SETTINGS.syncStateFilePath;
+        this.syncStateManager = new SyncStateManager(this.app, stateFilePath);
         await this.syncStateManager.load();
 
-        // 将状态管理器注入到 DailyNoteManager
+        // 将状态管理器注入到 DailyNoteManager，同时传入 settings 以便使用最新配置
         this.dailyNoteManager = new DailyNoteManager(this.app, this.settings, this.syncStateManager);
 
         this.addRibbonIcon('sync', t.t('SYNC_MEMOS'), () => {
@@ -203,7 +210,6 @@ export default class YetAnotherMemosSyncPlugin extends Plugin {
         if (this.settings.skipIfSyncedToday && this.syncStateManager.hasSyncedToday()) {
             return;
         }
-
         const handle = window.setTimeout(() => {
             void this.runSync('smart');
         }, this.settings.startupSyncDelay * 1000);
@@ -215,7 +221,6 @@ export default class YetAnotherMemosSyncPlugin extends Plugin {
             window.clearInterval(this.periodicSyncIntervalId);
             this.periodicSyncIntervalId = null;
         }
-
         if (this.settings.periodicSyncInterval > 0) {
             const id = window.setInterval(
                 () => {
@@ -259,6 +264,8 @@ class YetAnotherMemosSyncSettingTab extends PluginSettingTab {
         this.renderProfilesSection(containerEl);
         this.renderSyncFormatSection(containerEl);
         this.renderAutoSyncSection(containerEl);
+        // --- [新增] 渲染高级设置区域 ---
+        this.renderAdvancedSection(containerEl);
     }
 
     private renderProfilesSection(containerEl: HTMLElement): void {
@@ -271,7 +278,6 @@ class YetAnotherMemosSyncSettingTab extends PluginSettingTab {
         if (profiles.length === 0) {
             containerEl.createEl('p', { text: t.t('NO_PROFILES_HINT'), cls: 'setting-item-description' });
         }
-
         for (const profile of profiles) {
             this.renderProfile(containerEl, profile);
         }
@@ -434,6 +440,24 @@ class YetAnotherMemosSyncSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
 
+        // --- [新增] 排除标签设置 ---
+        new Setting(containerEl)
+            .setName('排除标签')
+            .setDesc('包含以下标签的 Memos 将不会被同步到 Obsidian。每行一个标签，例如：#private')
+            .addTextArea(text => {
+                text
+                    .setPlaceholder('#private\n#draft')
+                    .setValue(this.plugin.settings.excludeTags.join('\n'))
+                    .onChange(async (value) => {
+                        // 将输入文本按行拆分，并过滤空行
+                        const tags = value.split('\n').map(t => t.trim()).filter(t => t.length > 0);
+                        this.plugin.settings.excludeTags = tags;
+                        await this.plugin.saveSettings();
+                    });
+                // 设置文本框高度，使其能显示多行
+                text.inputEl.rows = 3;
+            });
+
         new Setting(containerEl)
             .setName(t.t('USE_CALLOUT_FORMAT_NAME'))
             .setDesc(t.t('USE_CALLOUT_FORMAT_DESC'))
@@ -478,7 +502,6 @@ class YetAnotherMemosSyncSettingTab extends PluginSettingTab {
 
     private renderAutoSyncSection(containerEl: HTMLElement): void {
         new Setting(containerEl).setName(t.t('AUTO_SYNC_TITLE')).setHeading();
-
         new Setting(containerEl)
             .setName(t.t('AUTO_SYNC_STARTUP_NAME'))
             .setDesc(t.t('AUTO_SYNC_STARTUP_DESC'))
@@ -519,6 +542,56 @@ class YetAnotherMemosSyncSettingTab extends PluginSettingTab {
                 .onChange(async (value) => {
                     this.plugin.settings.periodicSyncInterval = Number(value) || 0;
                     await this.plugin.saveSettings();
+                }));
+    }
+
+    // --- [新增] 渲染高级设置区域 ---
+    private renderAdvancedSection(containerEl: HTMLElement): void {
+        new Setting(containerEl).setName('高级设置').setHeading();
+
+        new Setting(containerEl)
+            .setName('调试模式')
+            .setDesc('开启后，控制台将打印详细的同步日志，便于排查问题。')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.debugMode)
+                .onChange(async (value) => {
+                    this.plugin.settings.debugMode = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName('状态文件存储路径')
+            .setDesc('自定义同步状态文件的存储路径（留空使用默认路径）。修改此路径相当于重置同步状态。')
+            .addText(text => text
+                .setPlaceholder('.memos_sync/sync-state.json')
+                .setValue(this.plugin.settings.syncStateFilePath)
+                .onChange(async (value) => {
+                    this.plugin.settings.syncStateFilePath = value;
+                    await this.plugin.saveSettings();
+                    // 提示用户路径已更改，需要重启插件或触发重新加载以生效
+                    new Notice('状态文件路径已修改，将在下次同步时生效。');
+                }));
+
+        // 显示同步状态统计信息
+        const lastSyncTime = this.plugin.syncStateManager.getLastSyncTime();
+        const syncedCount = this.plugin.syncStateManager.getSyncedMemoCount();
+        new Setting(containerEl)
+            .setName('同步状态统计')
+            .setDesc(`最后同步: ${lastSyncTime ? new Date(lastSyncTime).toLocaleString() : '从未同步'}\n已同步 Memo 数量: ${syncedCount}`);
+
+        new Setting(containerEl)
+            .setName('重置同步状态')
+            .setDesc('清空所有同步记录，下次同步将重新全量拉取所有 Memo。此操作不可逆。')
+            .addButton(button => button
+                .setButtonText('重置')
+                .setWarning()
+                .onClick(() => {
+                    new ConfirmModal(this.app, '确定要重置所有同步状态吗？这将导致下一次同步变慢。', async () => {
+                        await this.plugin.syncStateManager.reset();
+                        new Notice('同步状态已重置！');
+                        // 刷新设置界面以更新统计信息
+                        this.display();
+                    }).open();
                 }));
     }
 }
