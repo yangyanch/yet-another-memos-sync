@@ -2,6 +2,7 @@
 import { App, TFile, moment, requestUrl } from 'obsidian';
 import { getDailyNote, createDailyNote, getAllDailyNotes } from 'obsidian-daily-notes-interface';
 type MomentInstance = ReturnType<typeof moment>;
+
 import { MemosAPIClient } from '../api/memosClient';
 import { MemosProfile, MemosSettings, Memo, MemoSyncState, SyncStateStore } from '../types';
 import { transformMemoToMarkdown } from '../utils/memoTransformer';
@@ -69,6 +70,7 @@ class ObsidianLineItem {
             this.id = idMatch[1];
             cleanLine = cleanLine.replace(idMatch[0], '').trim();
         }
+
         const timeMatch = cleanLine.match(/^(\S*\s+)?(\d{1,2}:\d{2})/);
         if (timeMatch) {
             this.time = timeMatch[2];
@@ -98,6 +100,16 @@ export class DailyNoteManager {
         }
     }
 
+    // --- [新增] 判断文本是否仅包含 Frontmatter 或为空 ---
+    private isOnlyFrontmatter(text: string): boolean {
+        const trimmed = text.trim();
+        if (trimmed === '') return true;
+        
+        // 匹配标准 YAML Frontmatter (---\n...\n---) 或单行 Frontmatter (--- ... ---)
+        const frontmatterRegex = /^---\s*\n[\s\S]*?\n---\s*$|^---\s+.*\s+---\s*$/;
+        return frontmatterRegex.test(trimmed);
+    }
+
     private getCreatedTsFromItem(item: ObsidianLineItem, day: MomentInstance): number {
         const timeParts = item.time.split(':');
         const hour = parseInt(timeParts[0]);
@@ -117,7 +129,7 @@ export class DailyNoteManager {
     async syncAll(mode: SyncMode): Promise<void> {
         const profiles = (this.settings.profiles || []).filter(p => p.enabled && p.apiUrl && p.apiToken);
         if (profiles.length === 0) return;
-        
+
         this.debugLog(`Starting sync for ${profiles.length} profiles.`);
         
         for (const profile of profiles) {
@@ -147,6 +159,7 @@ export class DailyNoteManager {
                 console.error(`Error syncing ${dateStr}:`, err);
             }
         }
+
         this.gcMemoStates(profile.id, daysLimit);
         const now = moment().unix();
         await this.state.setLastSync(profile.id, String(now));
@@ -161,7 +174,7 @@ export class DailyNoteManager {
         const vault = this.app.vault;
         const baseFolder = this.settings.attachmentFolderPath || 'assets/memos';
         const dateFolder = day.format('YYYY-MM-DD'); // 生成日期文件夹名
-        
+
         // 最终路径：assets/memos/2023-10-01/image.png
         const fullPath = `${baseFolder}/${dateFolder}/${filename}`;
 
@@ -179,7 +192,7 @@ export class DailyNoteManager {
                 headers: { Authorization: `Bearer ${client.getToken()}` },
                 arrayBuffer: true
             } as any);
-            
+
             await vault.adapter.writeBinary(fullPath, response.arrayBuffer);
             this.debugLog(`Image saved: ${fullPath}`);
         } catch (e) {
@@ -193,11 +206,13 @@ export class DailyNoteManager {
         for (const res of resources) {
             const filename = getSafeFilename(res);
             let imageUrl = res.externalLink || null;
+
             if (!imageUrl && res.name) {
                 const uid = extractAttachmentUid(res.name);
                 if (uid) imageUrl = `${client.getBaseURL()}/file/attachments/${uid}/${filename}`;
             }
             if (!imageUrl && res.id) imageUrl = `${client.getBaseURL()}/file/${res.id}`;
+
             if (imageUrl) await this.saveImage(client, imageUrl, filename, day);
         }
     }
@@ -206,12 +221,12 @@ export class DailyNoteManager {
         const startTs = day.startOf('day').unix();
         const endTs = day.endOf('day').unix();
         const filter = `created_ts >= ${startTs} && created_ts < ${endTs}`;
-        
+
         this.debugLog(`Fetching memos for ${dateStr}...`);
         const page = await client.listMemos({ filter });
         let todayMemos = page.memos;
 
-                // --- [新增] 标签排除逻辑 ---
+        // --- [新增] 标签排除逻辑 ---
         const excludeTags = this.settings.excludeTags || [];
         if (excludeTags.length > 0) {
             const originalCount = todayMemos.length;
@@ -278,20 +293,21 @@ export class DailyNoteManager {
         const header = profile.dailyMemoHeader || '## 📓 Memos';
         const headerRegex = new RegExp(`^${this.escapeRegex(header)}`, 'm');
         const headerMatch = content.match(headerRegex);
-        
+
         if (!headerMatch) return;
 
         const headerIndex = content.indexOf(headerMatch[0]);
         const nextHeaderMatch = content.slice(headerIndex + 1).match(/\n## /);
         const memosSectionEnd = nextHeaderMatch ? headerIndex + 1 + (nextHeaderMatch.index ?? 0) : content.length;
+
         const lines = content.substring(headerIndex, memosSectionEnd).split('\n');
 
         // ... (解析逻辑保持不变) ...
         const obsidianItems: Map<string, ObsidianLineItem> = new Map();
         const newItems: ObsidianLineItem[] = [];
         const defaultTime = moment().format('HH:mm');
-        let currentItem: ObsidianLineItem | null = null;
 
+        let currentItem: ObsidianLineItem | null = null;
         const flushItem = () => {
             if (currentItem) {
                 if (!currentItem.id && currentItem.content) {
@@ -313,6 +329,7 @@ export class DailyNoteManager {
         for (let i = 1; i < lines.length; i++) {
             const line = lines[i];
             const isNewItem = /^\s*[-*]\s+\d{1,2}:\d{2}/.test(line);
+
             if (isNewItem) {
                 flushItem();
                 currentItem = new ObsidianLineItem(line, i, defaultTime);
@@ -330,10 +347,11 @@ export class DailyNoteManager {
         for (const item of obsidianItems.values()) {
             if (!item.id) continue;
             processedMemoIds.add(item.id);
+
             const remoteMemo = memosMap.get(item.id);
             const localContentClean = this.cleanContent(item.content);
             const localHash = simpleHash(localContentClean);
-            
+
             // [调试日志] 打印哈希值
             this.debugLog(`Comparing Item ${item.id}: LocalHash=${localHash}`);
 
@@ -353,7 +371,7 @@ export class DailyNoteManager {
                     this.debugLog(`Conflict detected for ${item.id}. Resolving...`);
                     const remoteTime = extractMemoTimestamp(remoteMemo);
                     const localTime = Math.floor(dailyNote.stat.mtime / 1000);
-                    
+
                     if (remoteTime >= localTime) {
                         await this.updateLocalLine(lines, item, remoteMemo);
                         await this.state.setMemoSyncState(profile.id, item.id, { hash: remoteHash, time: moment().unix() });
@@ -394,10 +412,12 @@ export class DailyNoteManager {
             const hour = parseInt(timeParts[0]);
             const minute = parseInt(timeParts[1]);
             if (isNaN(hour) || isNaN(minute)) continue;
+
             const createdTs = day.clone().hour(hour).minute(minute).second(0).unix();
             const safeContent = this.sanitizeContentForMemos(item.content);
             const newMemo = await client.createMemo(safeContent, createdTs);
             const newId = extractMemoId(newMemo);
+
             if (newId) {
                 this.debugLog(`Created new memo ${newId} from local item.`);
                 this.updateLocalLineId(lines, item, newId);
@@ -410,8 +430,8 @@ export class DailyNoteManager {
         // --- 服务端新项目的同步逻辑 ---
         for (const [id, memo] of memosMap) {
             if (processedMemoIds.has(id)) continue;
+
             const baseState = this.state.getMemoSyncState(profile.id, id);
-            
             if (baseState) {
                 if (this.settings.enableMirrorDelete) {
                     this.debugLog(`Deleted locally: ${id}, mirroring delete to Memos.`);
@@ -421,6 +441,7 @@ export class DailyNoteManager {
             } else {
                 this.debugLog(`Pulling new memo ${id}`);
                 await this.processResources(client, memo, day); // 传入 day 参数用于附件路径
+
                 const resources = memo.attachments || memo.resourceList || memo.resources || [];
                 const dailyMemoFormat = transformMemoToMarkdown(
                     { timestamp: extractMemoTimestamp(memo), content: memo.content, resources: resources || [] },
@@ -431,18 +452,41 @@ export class DailyNoteManager {
                     this.settings.tagMode,
                     this.settings.customTag
                 );
+
                 let finalText = dailyMemoFormat.content.trim();
                 let contentLines = finalText.split('\n');
                 contentLines[contentLines.length - 1] = `${contentLines[contentLines.length - 1]} ^${id}`;
                 lines.push(...contentLines);
+
                 const newHash = simpleHash(this.cleanContent(memo.content));
                 await this.state.setMemoSyncState(profile.id, id, { hash: newHash, time: moment().unix() });
                 needsUpdate = true;
             }
         }
 
+        // --- [重构] 文件写入与删除逻辑 ---
+        
+        // 1. 先计算当前内存中的 Memos 区域状态
+        const cleanLines = lines.filter(l => l !== null);
+        const isMemosSectionEmpty = cleanLines.filter(l => l.trim().length > 0).length <= 1; // 仅剩标题或完全为空
+
+        // 2. 检查是否需要执行删除空文件逻辑 (无论 needsUpdate 为何，只要区域为空且开关开启就检查)
+        if (isMemosSectionEmpty && this.settings.removeEmptyDailyNotes) {
+            const beforeContent = content.substring(0, headerIndex).trim();
+            const afterContent = content.substring(memosSectionEnd).trim();
+
+            // 判断文件其余部分是否为空（允许 Frontmatter）
+            const hasOtherContent = (afterContent.length > 0) || !this.isOnlyFrontmatter(beforeContent);
+
+            if (!hasOtherContent) {
+                this.debugLog(`Daily note ${dateStr} is empty (only Frontmatter/Memos header found). 'Remove Empty Daily Notes' is ON. Deleting file.`);
+                await this.app.vault.delete(dailyNote);
+                return; // 结束处理，无需后续更新
+            }
+        }
+
+        // 3. 如果文件未删除，且有更新需求，则写入文件
         if (needsUpdate) {
-            const cleanLines = lines.filter(l => l !== null);
             const newSectionContent = cleanLines.join('\n');
             const newFileContent = content.substring(0, headerIndex) + newSectionContent + content.substring(memosSectionEnd);
             await this.app.vault.modify(dailyNote, newFileContent);
@@ -461,9 +505,11 @@ export class DailyNoteManager {
             this.settings.tagMode,
             this.settings.customTag
         );
+
         let finalText = formatted.content.trim();
         let contentLines = finalText.split('\n');
         contentLines[contentLines.length - 1] = `${contentLines[contentLines.length - 1]} ^${item.id}`;
+
         for (let i = item.lineIndex; i <= item.endLineIndex; i++) {
             lines[i] = '';
         }
@@ -495,6 +541,7 @@ export class DailyNoteManager {
         try {
             const existing = getDailyNote(momentDay, getAllDailyNotes());
             if (existing instanceof TFile) return existing;
+
             if (this.settings.createMissingDailyNotes) {
                 const created = await createDailyNote(momentDay);
                 if (created instanceof TFile) return created;

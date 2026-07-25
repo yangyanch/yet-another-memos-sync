@@ -16,10 +16,12 @@ interface LegacySettings {
 }
 
 // [修改说明]：假设已在 src/types.ts 中为 MemosSettings 添加了以下字段：
-// excludeTags: string[];       // 排除的标签列表
-// syncStateFilePath: string;   // 状态文件存储路径
-// debugMode: boolean;          // 调试模式开关
+// excludeTags: string[]; // 排除的标签列表
+// syncStateFilePath: string; // 状态文件存储路径
+// debugMode: boolean; // 调试模式开关
+// removeEmptyDailyNotes: boolean; // 自动清理空日记文件
 // 如果尚未添加，请先添加，或在此处扩展接口定义。
+
 const DEFAULT_SETTINGS: MemosSettings = {
     profiles: [],
     attachmentFolderPath: 'assets',
@@ -31,7 +33,8 @@ const DEFAULT_SETTINGS: MemosSettings = {
     startupSyncDelay: 5,
     skipIfSyncedToday: true,
     periodicSyncInterval: 0,
-    enableMirrorDelete: false, 
+    enableMirrorDelete: false,
+    removeEmptyDailyNotes: false, // [新增] 默认关闭，防止误删文件
     showEmoji: false,
     tagMode: 'smart',
     customTag: '#Memos',
@@ -62,16 +65,13 @@ function defaultProfile(): MemosProfile {
  */
 function migrateSettings(raw: unknown): MemosSettings {
     const legacy = (raw && typeof raw === 'object' ? raw : {}) as LegacySettings;
-    const merged: MemosSettings = {
-        ...DEFAULT_SETTINGS,
-        ...(legacy as object)
-    };
+    const merged: MemosSettings = { ...DEFAULT_SETTINGS, ...(legacy as object) };
 
     // 迁移旧的平铺配置到 profiles
     if (!Array.isArray(merged.profiles) || merged.profiles.length === 0) {
         const legacyApiUrl = typeof legacy.apiUrl === 'string' ? legacy.apiUrl : '';
         const legacyApiToken = typeof legacy.apiToken === 'string' ? legacy.apiToken : '';
-        const legacyHeader = typeof legacy.dailyMemoHeader === 'string' ? legacy.dailyMemoHeader : '## 📓 Memos';
+        const legacyHeader = typeof legacy.dailyMemoHeader === 'string' ? legacy.dailyMemoHeader : '## 📝 Memos';
         const legacyDays = typeof legacy.syncDaysLimit === 'number' ? legacy.syncDaysLimit : 30;
 
         if (legacyApiUrl || legacyApiToken) {
@@ -100,6 +100,7 @@ function migrateSettings(raw: unknown): MemosSettings {
     delete cleaned.lastSyncByProfile;
     delete cleaned.memoStatesByProfile;
     delete cleaned.lastSyncDate;
+
     return merged;
 }
 
@@ -107,6 +108,7 @@ class ConfirmModal extends Modal {
     constructor(app: App, private message: string, private onConfirm: () => void) {
         super(app);
     }
+
     onOpen(): void {
         this.contentEl.createEl('p', { text: this.message });
         const buttons = this.contentEl.createDiv({ cls: 'modal-button-container' });
@@ -121,6 +123,7 @@ class ConfirmModal extends Modal {
                 this.onConfirm();
             });
     }
+
     onClose(): void {
         this.contentEl.empty();
     }
@@ -221,6 +224,7 @@ export default class YetAnotherMemosSyncPlugin extends Plugin {
             window.clearInterval(this.periodicSyncIntervalId);
             this.periodicSyncIntervalId = null;
         }
+
         if (this.settings.periodicSyncInterval > 0) {
             const id = window.setInterval(
                 () => {
@@ -278,6 +282,7 @@ class YetAnotherMemosSyncSettingTab extends PluginSettingTab {
         if (profiles.length === 0) {
             containerEl.createEl('p', { text: t.t('NO_PROFILES_HINT'), cls: 'setting-item-description' });
         }
+
         for (const profile of profiles) {
             this.renderProfile(containerEl, profile);
         }
@@ -294,6 +299,7 @@ class YetAnotherMemosSyncSettingTab extends PluginSettingTab {
 
     private renderProfile(containerEl: HTMLElement, profile: MemosProfile): void {
         const card = containerEl.createDiv({ cls: 'yams-profile-card' });
+
         new Setting(card).setName(profile.name || 'Unnamed').setHeading();
 
         new Setting(card)
@@ -380,6 +386,17 @@ class YetAnotherMemosSyncSettingTab extends PluginSettingTab {
                 .setValue(this.plugin.settings.enableMirrorDelete)
                 .onChange(async (value) => {
                     this.plugin.settings.enableMirrorDelete = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        // --- [新增] 自动清理空日记文件设置 ---
+        new Setting(containerEl)
+            .setName('自动清理空日记文件')
+            .setDesc('同步后，如果日记文件的 Memos 区域为空（即 Memos 端已全部删除），且该文件没有其他内容，则自动删除该日记文件。')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.removeEmptyDailyNotes)
+                .onChange(async (value) => {
+                    this.plugin.settings.removeEmptyDailyNotes = value;
                     await this.plugin.saveSettings();
                 }));
 
@@ -502,6 +519,7 @@ class YetAnotherMemosSyncSettingTab extends PluginSettingTab {
 
     private renderAutoSyncSection(containerEl: HTMLElement): void {
         new Setting(containerEl).setName(t.t('AUTO_SYNC_TITLE')).setHeading();
+
         new Setting(containerEl)
             .setName(t.t('AUTO_SYNC_STARTUP_NAME'))
             .setDesc(t.t('AUTO_SYNC_STARTUP_DESC'))

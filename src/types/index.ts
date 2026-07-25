@@ -64,8 +64,10 @@ export interface MemosSettings {
 
     // --- 新增：安全开关 ---
     enableMirrorDelete: boolean;
+    
+    // --- [新增] 自动清理空日记文件 ---
+    removeEmptyDailyNotes: boolean; // 同步后若日记文件为空则自动删除
 
-    // 新增设置
     showEmoji: boolean;
     tagMode: 'none' | 'smart' | 'always';
     customTag: string;
